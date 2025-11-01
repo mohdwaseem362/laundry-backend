@@ -5,12 +5,14 @@ namespace App\Http\Controllers\Admin;
 use Illuminate\Routing\Controller as BaseController;
 use App\Models\Order;
 use App\Models\Message;
+use App\Models\User;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Facades\DB;
 use Symfony\Component\HttpFoundation\Response;
 
 class OrderController extends BaseController
@@ -63,12 +65,14 @@ class OrderController extends BaseController
         ]);
     }
 
+
     public function create()
     {
-        // you can pass services, users list (customers), etc.
+        // return customers list only (no services)
+        $customers = User::role('Customer')->select('id', 'name', 'email')->get();
+
         return Inertia::render('Admin/Orders/Create', [
-            'customers' => \App\Models\User::whereHas('roles', fn($q) => $q->where('name', 'Customer'))->select('id', 'name', 'email')->get(),
-            'services' => \App\Models\Service::all(['id', 'name', 'price']),
+            'customers' => $customers,
         ]);
     }
 
@@ -77,42 +81,61 @@ class OrderController extends BaseController
         $data = $request->validate([
             'user_id' => 'required|exists:users,id',
             'items' => 'required|array|min:1',
-            'items.*.service_id' => 'required|exists:services,id',
-            'items.*.qty' => 'required|integer|min:1',
+            'items.*.service_name' => 'required|string|max:255',
+            'items.*.unit_price' => 'required|numeric|min:0',
+            'items.*.quantity' => 'required|integer|min:1',
+            'notes' => 'nullable|string|max:2000',
             'status' => 'nullable|in:requested,processing,completed,cancelled',
         ]);
 
-        \DB::beginTransaction();
+        DB::beginTransaction();
         try {
             $order = Order::create([
                 'user_id' => $data['user_id'],
                 'order_number' => 'ORD' . time() . rand(100, 999),
                 'status' => $data['status'] ?? 'requested',
-                'total' => 0, // will compute below
+                'subtotal' => 0,
+                'tax' => 0,
+                'total' => 0,
+                'notes' => $data['notes'] ?? null,
             ]);
 
-            $total = 0;
+            $subtotal = 0;
             foreach ($data['items'] as $it) {
-                $service = \App\Models\Service::find($it['service_id']);
-                $sub = ($service->price ?? 0) * $it['qty'];
+                $qty = (int) $it['quantity'];
+                $unit = (float) $it['unit_price'];
+                $sub = $qty * $unit;
+
                 $order->items()->create([
-                    'service_id' => $service->id,
-                    'qty' => $it['qty'],
-                    'unit_price' => $service->price,
+                    'service_code' => $it['service_code'] ?? null, // optional free text or SKU
+                    'service_name' => $it['service_name'],
+                    'quantity' => $qty,
+                    'unit_price' => $unit,
                     'subtotal' => $sub,
+                    'meta' => $it['meta'] ?? null,
                 ]);
-                $total += $sub;
+
+                $subtotal += $sub;
             }
 
-            $order->update(['total' => $total]);
+            // compute tax / discount if you need — basic example (0% tax)
+            $tax = 0;
+            $total = $subtotal + $tax;
 
-            \DB::commit();
+            $order->update([
+                'subtotal' => $subtotal,
+                'tax' => $tax,
+                'total' => $total,
+            ]);
 
+            DB::commit();
+
+            // redirect to show page (your booted() will create conversation)
             return redirect()->route('admin.orders.show', $order->id);
         } catch (\Throwable $e) {
-            \DB::rollBack();
-            Log::error('Order create failed', ['error' => $e->getMessage()]);
-            return back()->with('error', 'Failed to create order.');
+            DB::rollBack();
+            Log::error('Order store failed: ' . $e->getMessage(), ['trace' => $e->getTraceAsString()]);
+            return back()->with('error', 'Failed to create order.')->withInput();
         }
     }
 
