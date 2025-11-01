@@ -140,7 +140,6 @@ const orders = props.orders
 // local UI state
 const q = ref('')
 const perPage = ref(Number(orders.per_page ?? 15))
-
 // filtered list (client-side quick search)
 const visibleOrders = computed(() => {
   const term = q.value.trim().toLowerCase()

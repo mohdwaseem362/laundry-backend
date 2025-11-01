@@ -14,8 +14,8 @@
             <strong>${{ order.final_amount || order.total || 0 }}</strong>
           </div>
 
-          <div class="relative">
-            <button @click="toggleActions" class="rounded-md bg-indigo-600 px-3 py-1 text-sm text-white">Actions ▾</button>
+          <div class="relative" ref="actionsRoot">
+            <button @click.stop="toggleActions" class="rounded-md bg-indigo-600 px-3 py-1 text-sm text-white">Actions ▾</button>
             <div v-if="showActions" class="absolute right-0 mt-2 w-48 rounded-md border bg-white shadow-lg z-20">
               <button @click="changeStatus('processing')" class="block w-full px-4 py-2 text-left text-sm hover:bg-gray-50">Mark Processing</button>
               <button @click="changeStatus('completed')" class="block w-full px-4 py-2 text-left text-sm hover:bg-gray-50">Mark Completed</button>
@@ -28,7 +28,7 @@
 
     <div class="py-6">
       <div class="mx-auto max-w-6xl space-y-6 px-4 sm:px-6 lg:px-8">
-        <!-- Top details -->
+        <!-- Top details (unchanged) -->
         <div class="grid grid-cols-1 gap-6 md:grid-cols-3">
           <div class="rounded-lg border p-4">
             <h3 class="text-sm font-medium text-gray-600">Customer</h3>
@@ -59,7 +59,7 @@
           </div>
         </div>
 
-        <!-- Items table -->
+        <!-- Items table (unchanged) -->
         <div class="rounded-lg border bg-white p-4">
           <h3 class="mb-3 text-sm font-medium text-gray-700">Items</h3>
           <div v-if="order.items && order.items.length">
@@ -103,14 +103,43 @@
 
           <div class="rounded-lg border p-4">
             <h3 class="text-sm font-medium text-gray-700">Messages</h3>
-            <div class="mt-3 space-y-3 max-h-48 overflow-auto">
-              <div v-for="m in messages" :key="m.id" class="rounded-md border p-2">
-                <div class="text-xs text-gray-500">{{ formatDateTime(m.created_at) }} • <strong>{{ m.from || m.user?.name || 'System' }}</strong></div>
-                <div class="mt-1 text-sm">{{ m.message || m.content }}</div>
-              </div>
+
+            <!-- messages list -->
+            <div class="mt-3 space-y-3 max-h-64 overflow-auto" ref="messagesBox">
               <div v-if="messages.length === 0" class="text-sm text-gray-400">No messages yet</div>
+
+              <div v-for="m in messages" :key="m._temp_id ?? m.id" class="rounded-md border p-2 bg-white">
+                <div class="flex items-start justify-between">
+                  <div class="text-xs text-gray-500">
+                    {{ formatDateTime(m.created_at) }} • <strong>{{ m.from || m.user?.name || 'System' }}</strong>
+                    <span v-if="m.sending" class="ml-2 text-xs text-gray-400">• Sending…</span>
+                  </div>
+                  <div v-if="m.attachment && m.attachment.uploadProgress !== undefined" class="text-xs text-gray-400">
+                    <span v-if="m.attachment.uploadProgress < 100">{{ m.attachment.uploadProgress }}%</span>
+                    <span v-else>Uploaded</span>
+                  </div>
+                </div>
+
+                <div class="mt-1 text-sm break-words">{{ m.message || m.content }}</div>
+
+                <!-- Attachment rendering -->
+                <div v-if="m.attachment && m.attachment.url" class="mt-2">
+                  <!-- image preview for common image types -->
+                  <img v-if="isImage(m.attachment.mime)" :src="m.attachment.url" class="max-h-40 rounded-md border" alt="attachment" />
+
+                  <!-- non-image: show file link -->
+                  <div v-else class="flex items-center gap-2">
+                    <svg class="h-4 w-4 text-gray-500" viewBox="0 0 24 24" fill="none"><path d="M12 2v10l3-3 0 0 5 0v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h6z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    <a :href="m.attachment.url" target="_blank" rel="noopener noreferrer" class="text-sm text-indigo-600 hover:underline">
+                      {{ m.attachment.filename || 'Attachment' }}
+                    </a>
+                    <span class="text-xs text-gray-400">({{ formatBytes(m.attachment.size) }})</span>
+                  </div>
+                </div>
+              </div>
             </div>
 
+            <!-- message form -->
             <form @submit.prevent="sendMessage" class="mt-3 flex flex-col gap-2">
               <textarea
                 v-model="messageText"
@@ -120,22 +149,42 @@
                 :disabled="sending"
               ></textarea>
 
+              <!-- file input + preview -->
               <div class="flex items-center gap-2">
                 <input
                   ref="fileInput"
                   type="file"
                   @change="handleFile"
+                  :accept="acceptedTypes"
                   class="text-xs text-gray-500"
                   :disabled="sending"
                 />
-                <button
-                  :disabled="sending || (!messageText && !attachedFile)"
-                  type="submit"
-                  class="ml-auto rounded-md bg-indigo-600 px-3 py-1 text-sm text-white disabled:bg-gray-400"
-                >
-                  <span v-if="!sending">Send</span>
-                  <span v-else>Sending…</span>
-                </button>
+                <div v-if="attachedFile" class="text-xs text-gray-600">
+                  <div class="flex items-center gap-2">
+                    <span>{{ attachedFile.name }}</span>
+                    <span class="text-gray-400">({{ formatBytes(attachedFile.size) }})</span>
+                    <button type="button" @click="removeFile" :disabled="sending" class="ml-2 text-red-500 text-xs hover:underline">Remove</button>
+                  </div>
+                </div>
+
+                <div class="ml-auto flex items-center gap-2">
+                  <button
+                    :disabled="sending || (!messageText && !attachedFile)"
+                    type="submit"
+                    class="ml-auto rounded-md bg-indigo-600 px-3 py-1 text-sm text-white disabled:bg-gray-400"
+                  >
+                    <span v-if="!sending">Send</span>
+                    <span v-else>Sending…</span>
+                  </button>
+                </div>
+              </div>
+
+              <!-- global upload progress bar -->
+              <div v-if="uploadProgress > 0 && uploadProgress < 100" class="mt-1">
+                <div class="h-2 w-full rounded-full bg-gray-200">
+                  <div :style="{ width: uploadProgress + '%' }" class="h-2 rounded-full bg-indigo-600"></div>
+                </div>
+                <div class="text-xs text-gray-500 mt-1">{{ uploadProgress }}%</div>
               </div>
             </form>
           </div>
@@ -156,136 +205,53 @@
 
 <script setup>
 import AdminLayout from '@/Layouts/AdminLayout.vue'
-import { ref, onMounted, onUnmounted } from 'vue'
+import axios from 'axios'
+import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
 import { router } from '@inertiajs/vue3'
 
-// Use defineProps for better TypeScript support and clarity
+// props
 const props = defineProps({
-  order: {
-    type: Object,
-    required: true,
-    default: () => ({})
-  },
-  messages: {
-    type: Array,
-    default: () => []
-  }
+  order: { type: Object, required: true, default: () => ({}) },
+  messages: { type: Array, default: () => [] }
 })
 
-// local UI state
+// state
 const showActions = ref(false)
 const sending = ref(false)
 const messageText = ref('')
 const attachedFile = ref(null)
-const fileInput = ref(null) // Proper ref for file input
-const messages = ref([...props.messages])
+const fileInput = ref(null)
+const messages = ref([...props.messages]) // reactive local copy
 const debugOpen = ref(false)
+const uploadProgress = ref(0)
+const actionsRoot = ref(null)
+const messagesBox = ref(null)
+const indexRoute = '/admin/orders'
 
-// Close actions dropdown when clicking outside
+// accepted file types (adjust as needed)
+const acceptedTypes = '.png,.jpg,.jpeg,.gif,.pdf,.doc,.docx,.xls,.xlsx,.txt'
+
+// helper: close dropdown on outside click
 function handleClickOutside(event) {
-  if (!event.target.closest('.relative')) {
+  if (!actionsRoot.value) return
+  if (!actionsRoot.value.contains(event.target)) {
     showActions.value = false
   }
 }
 
 onMounted(() => {
   document.addEventListener('click', handleClickOutside)
+  // auto scroll to bottom of messages
+  nextTick(() => scrollMessagesToBottom())
 })
 
 onUnmounted(() => {
   document.removeEventListener('click', handleClickOutside)
 })
 
-// Route helpers
-const indexRoute = '/admin/orders'
-
-function toggleActions() {
-  showActions.value = !showActions.value
-}
-
-// Status update using Inertia
-function changeStatus(status) {
-  if (!confirm(`Change order status to "${status}"?`)) return
-
-  showActions.value = false
-
-  router.patch(route('admin.orders.update', props.order.id), {
-    status: status
-  }, {
-    preserveScroll: true,
-    onSuccess: () => {
-      // Status will be updated via the reactive props
-    },
-    onError: (errors) => {
-      alert('Failed to update status: ' + (errors.status || 'Unknown error'))
-    }
-  })
-}
-
-function handleFile(event) {
-  const file = event.target.files[0]
-  if (file) {
-    // Validate file size (5MB max)
-    if (file.size > 5 * 1024 * 1024) {
-      alert('File size must be less than 5MB')
-      event.target.value = ''
-      return
-    }
-    attachedFile.value = file
-  }
-}
-
-// Message sending
-async function sendMessage() {
-  if (!messageText.value.trim() && !attachedFile.value) {
-    alert('Please enter a message or attach a file')
-    return
-  }
-
-  sending.value = true
-
-  try {
-    const formData = new FormData()
-    formData.append('message', messageText.value.trim())
-    if (attachedFile.value) {
-      formData.append('attachment', attachedFile.value)
-    }
-
-    const response = await fetch(route('admin.orders.message', props.order.id), {
-      method: 'POST',
-      headers: {
-        'X-Requested-With': 'XMLHttpRequest',
-        'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').getAttribute('content')
-      },
-      body: formData
-    })
-
-    if (response.ok) {
-      const result = await response.json()
-
-      // Add new message to the list
-      if (result.message) {
-        messages.value.unshift(result.message)
-      }
-
-      // Reset form
-      messageText.value = ''
-      attachedFile.value = null
-      if (fileInput.value) {
-        fileInput.value.value = ''
-      }
-    } else {
-      throw new Error('Failed to send message')
-    }
-  } catch (error) {
-    console.error('Message send error:', error)
-    alert('Failed to send message. Please try again.')
-  } finally {
-    sending.value = false
-  }
-}
-
 // UI helpers
+function toggleActions() { showActions.value = !showActions.value }
+
 function statusClass(status) {
   const statusMap = {
     pending: 'text-yellow-600',
@@ -300,23 +266,163 @@ function statusClass(status) {
 
 function formatDate(dateString) {
   if (!dateString) return '—'
+  try { return new Date(dateString).toLocaleDateString() } catch { return '—' }
+}
+function formatDateTime(dateString) {
+  if (!dateString) return '—'
+  try { return new Date(dateString).toLocaleString() } catch { return '—' }
+}
+
+function formatBytes(bytes) {
+  if (!bytes) return '0 B'
+  const sizes = ['B','KB','MB','GB','TB']
+  const i = Math.floor(Math.log(bytes) / Math.log(1024))
+  return `${(bytes / Math.pow(1024, i)).toFixed( i ? 1 : 0 )} ${sizes[i]}`
+}
+
+function isImage(mime) {
+  return !!mime && mime.startsWith('image/')
+}
+
+// remove selected file
+function removeFile() {
+  attachedFile.value = null
+  if (fileInput.value) fileInput.value.value = ''
+}
+
+// handle file change
+function handleFile(event) {
+  const file = event.target.files && event.target.files[0]
+  if (!file) {
+    attachedFile.value = null
+    return
+  }
+
+  // client-side validation: 5MB max
+  const maxSize = 5 * 1024 * 1024
+  if (file.size > maxSize) {
+    alert('File size must be less than 5MB')
+    event.target.value = ''
+    return
+  }
+
+  // optional: restrict file types on client
+  attachedFile.value = file
+}
+
+// optimistic id generator for local messages
+function tempId() {
+  return 't-' + Date.now() + '-' + Math.floor(Math.random() * 1000)
+}
+
+// scroll messages container to bottom
+function scrollMessagesToBottom() {
+  if (!messagesBox.value) return
+  messagesBox.value.scrollTop = messagesBox.value.scrollHeight
+}
+
+// send message with attachment using axios so we can track progress (clean async/await)
+async function sendMessage() {
+  if (!messageText.value.trim() && !attachedFile.value) {
+    alert('Please enter a message or attach a file')
+    return
+  }
+
+  sending.value = true
+  uploadProgress.value = 0
+
+  // create optimistic message entry locally
+  const tempMessage = {
+    _temp_id: tempId(),
+    message: messageText.value.trim(),
+    created_at: new Date().toISOString(),
+    from: 'Admin',
+    sending: true,
+    attachment: attachedFile.value ? {
+      filename: attachedFile.value.name,
+      size: attachedFile.value.size,
+      mime: attachedFile.value.type,
+      uploadProgress: 0
+    } : null
+  }
+
+  messages.value.unshift(tempMessage)
+  nextTick(() => scrollMessagesToBottom())
+
+  const formData = new FormData()
+  formData.append('message', messageText.value.trim())
+  if (attachedFile.value) formData.append('attachment', attachedFile.value)
+
   try {
-    return new Date(dateString).toLocaleDateString()
-  } catch {
-    return '—'
+    const response = await axios.post(route('admin.orders.message', props.order.id), formData, {
+      headers: { 'X-Requested-With': 'XMLHttpRequest' },
+      onUploadProgress: (progressEvent) => {
+        if (!progressEvent.lengthComputable) return
+        const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total)
+        uploadProgress.value = percent
+        if (tempMessage.attachment) tempMessage.attachment.uploadProgress = percent
+      }
+    })
+
+    // expected payload: { message: { ... } }
+    if (response && response.data && response.data.message) {
+      // remove temp message and insert server message at top
+      const idx = messages.value.findIndex(m => m._temp_id === tempMessage._temp_id)
+      if (idx !== -1) messages.value.splice(idx, 1)
+      messages.value.unshift(response.data.message)
+    } else {
+      // fallback: just mark optimistic as failed
+      const idx = messages.value.findIndex(m => m._temp_id === tempMessage._temp_id)
+      if (idx !== -1) {
+        messages.value[idx].sending = false
+        messages.value[idx].failed = true
+      }
+      alert('Unexpected server response. Check the network tab.')
+    }
+  } catch (err) {
+    console.error('Message send failed', err)
+    // mark optimistic message as failed
+    const idx = messages.value.findIndex(m => m._temp_id === tempMessage._temp_id)
+    if (idx !== -1) {
+      messages.value[idx].sending = false
+      messages.value[idx].failed = true
+    }
+
+    // try to surface validation errors if available
+    const errData = err.response && err.response.data
+    if (errData && errData.errors) {
+      const messagesArr = Object.values(errData.errors).flat()
+      alert(messagesArr.join('\n'))
+    } else {
+      alert('Failed to send message. Please try again.')
+    }
+  } finally {
+    sending.value = false
+    uploadProgress.value = 0
+    messageText.value = ''
+    attachedFile.value = null
+    if (fileInput.value) fileInput.value.value = ''
+    nextTick(() => scrollMessagesToBottom())
   }
 }
 
-function formatDateTime(dateString) {
-  if (!dateString) return '—'
-  try {
-    return new Date(dateString).toLocaleString()
-  } catch {
-    return '—'
-  }
+// change status (keeps your existing flow)
+function changeStatus(status) {
+  if (!confirm(`Change order status to "${status}"?`)) return
+  showActions.value = false
+
+  router.patch(route('admin.orders.update', props.order.id), { status }, {
+    preserveScroll: true,
+    onSuccess: () => { /* optimistic update may be done on server props refresh */ },
+    onError: (errors) => { alert('Failed to update status: ' + (errors.status || 'Unknown error')) }
+  })
 }
 </script>
 
 <style scoped>
-/* Custom styles if needed */
+/* small visual tweak if you want zebra-ish rows on large screens */
+@media (min-width: 640px) {
+  tbody tr:nth-child(odd) { background-color: #ffffff; }
+  tbody tr:nth-child(even) { background-color: #fbfbfb; }
+}
 </style>

@@ -13,13 +13,13 @@ class Message extends Model
         'conversation_id',
         'user_id',
         'body',
-        'attachments',
+        'attachment',
         'direction',
         'provider_message_id',
     ];
 
     protected $casts = [
-        'attachments' => 'array',
+        'attachment' => 'array',
     ];
 
     public function conversation()

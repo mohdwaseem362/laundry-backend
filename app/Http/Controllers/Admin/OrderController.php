@@ -7,6 +7,11 @@ use App\Models\Order;
 use App\Models\Message;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Validator;
+use Symfony\Component\HttpFoundation\Response;
 
 class OrderController extends BaseController
 {
@@ -19,27 +24,134 @@ class OrderController extends BaseController
     // List orders (simple pagination + filters later)
     public function index(Request $request)
     {
-        $q = Order::with(['user', 'agent'])->orderBy('created_at', 'desc');
+        // base query with relations
+        $query = Order::with(['user', 'agent'])->orderBy('created_at', 'desc');
 
+        // filters
         if ($request->filled('status')) {
-            $q->where('status', $request->status);
+            $query->where('status', $request->status);
         }
 
-        $orders = $q->paginate(15)->withQueryString();
-        // dd($orders);
+        if ($request->filled('q')) {
+            $term = trim($request->q);
+            $query->where(function ($q) use ($term) {
+                // match order number, id, or user fields
+                $q->where('order_number', 'LIKE', "%{$term}%")
+                    ->orWhere('id', $term)
+                    ->orWhereHas('user', function ($uq) use ($term) {
+                        $uq->where('name', 'LIKE', "%{$term}%")
+                            ->orWhere('email', 'LIKE', "%{$term}%");
+                    });
+            });
+        }
+
+        // optional: date range filter (created_at)
+        if ($request->filled('from')) {
+            $query->whereDate('created_at', '>=', $request->from);
+        }
+        if ($request->filled('to')) {
+            $query->whereDate('created_at', '<=', $request->to);
+        }
+
+        $perPage = (int) $request->input('per_page', 15);
+        $orders = $query->paginate($perPage)->withQueryString();
+
         return Inertia::render('Admin/Orders/Index', [
             'orders' => $orders,
+            // useful to surface current filters on front-end
+            'filters' => $request->only(['q', 'status', 'from', 'to', 'per_page']),
         ]);
     }
 
+    public function create()
+    {
+        // you can pass services, users list (customers), etc.
+        return Inertia::render('Admin/Orders/Create', [
+            'customers' => \App\Models\User::whereHas('roles', fn($q) => $q->where('name', 'Customer'))->select('id', 'name', 'email')->get(),
+            'services' => \App\Models\Service::all(['id', 'name', 'price']),
+        ]);
+    }
+
+    public function store(Request $request)
+    {
+        $data = $request->validate([
+            'user_id' => 'required|exists:users,id',
+            'items' => 'required|array|min:1',
+            'items.*.service_id' => 'required|exists:services,id',
+            'items.*.qty' => 'required|integer|min:1',
+            'status' => 'nullable|in:requested,processing,completed,cancelled',
+        ]);
+
+        \DB::beginTransaction();
+        try {
+            $order = Order::create([
+                'user_id' => $data['user_id'],
+                'order_number' => 'ORD' . time() . rand(100, 999),
+                'status' => $data['status'] ?? 'requested',
+                'total' => 0, // will compute below
+            ]);
+
+            $total = 0;
+            foreach ($data['items'] as $it) {
+                $service = \App\Models\Service::find($it['service_id']);
+                $sub = ($service->price ?? 0) * $it['qty'];
+                $order->items()->create([
+                    'service_id' => $service->id,
+                    'qty' => $it['qty'],
+                    'unit_price' => $service->price,
+                    'subtotal' => $sub,
+                ]);
+                $total += $sub;
+            }
+
+            $order->update(['total' => $total]);
+
+            \DB::commit();
+
+            return redirect()->route('admin.orders.show', $order->id);
+        } catch (\Throwable $e) {
+            \DB::rollBack();
+            Log::error('Order create failed', ['error' => $e->getMessage()]);
+            return back()->with('error', 'Failed to create order.');
+        }
+    }
 
     // Show single order + conversation + items
     public function show($id)
     {
         $order = Order::with(['items', 'conversation.messages.user', 'user', 'agent'])->findOrFail($id);
 
+        // normalize messages for frontend (optional: transform as needed)
+        $messages = $order->conversation
+            ? $order->conversation->messages()->with('user')->latest()->get()->map(function ($m) {
+                $attachment = null;
+                if ($m->attachment) {
+                    // attachment stored as JSON/array in DB (see model cast note below)
+                    $att = is_array($m->attachment) ? $m->attachment : json_decode($m->attachment, true);
+                    if ($att) {
+                        $attachment = [
+                            'url' => $att['url'] ?? (isset($att['path']) ? Storage::url($att['path']) : null),
+                            'filename' => $att['filename'] ?? null,
+                            'mime' => $att['mime'] ?? null,
+                            'size' => $att['size'] ?? null,
+                        ];
+                    }
+                }
+
+                return [
+                    'id' => $m->id,
+                    'message' => $m->body ?? $m->message ?? null,
+                    'created_at' => optional($m->created_at)->toISOString(),
+                    'from' => $m->from ?? ($m->user->name ?? 'System'),
+                    'user' => $m->user ? ['id' => $m->user->id, 'name' => $m->user->name] : null,
+                    'attachment' => $attachment,
+                ];
+            })
+            : collect();
+
         return Inertia::render('Admin/Orders/Show', [
-            'order' => $order
+            'order' => $order,
+            'messages' => $messages,
         ]);
     }
 
@@ -56,10 +168,15 @@ class OrderController extends BaseController
         $order->fill($request->only(['status', 'agent_id']));
         $order->save();
 
+        // prefer redirect for non-AJAX flows
+        if ($request->wantsJson() || $request->ajax()) {
+            return response()->json(['status' => 'ok', 'order' => $order], Response::HTTP_OK);
+        }
+
         return redirect()->back();
     }
 
-    // Post admin reply in conversation
+    // Post admin reply in conversation (supports attachment)
     public function message(Request $request, $id)
     {
         $order = Order::findOrFail($id);
@@ -69,17 +186,96 @@ class OrderController extends BaseController
             $conv = $order->conversation()->create(['channel' => 'web']);
         }
 
-        $request->validate([
-            'body' => 'required|string',
-        ]);
+        // accept both 'message' (client) and 'body' (older)
+        $textKey = $request->has('message') ? 'message' : 'body';
+
+        $rules = [
+            $textKey => 'nullable|string|max:5000',
+            'attachment' => 'nullable|file|max:5120|mimes:png,jpg,jpeg,gif,pdf,doc,docx,xls,xlsx,txt',
+        ];
+
+        $validator = Validator::make($request->all(), $rules);
+
+        if ($validator->fails()) {
+            if ($request->wantsJson() || $request->ajax()) {
+                return response()->json(['errors' => $validator->errors()], Response::HTTP_UNPROCESSABLE_ENTITY);
+            }
+            return redirect()->back()->withErrors($validator)->withInput();
+        }
+
+        $attachmentData = null;
+
+        if ($request->hasFile('attachment')) {
+            $file = $request->file('attachment');
+
+            // disk name from config (e.g. 's3' pointing to MinIO locally)
+            $diskName = config('filesystems.default');
+
+            // create a deterministic path — include order id to organize files
+            $dir = "order_attachments/{$order->id}";
+
+            // generate a safe filename to avoid collisions
+            $ext = $file->getClientOriginalExtension();
+            $safeName = Str::slug(pathinfo($file->getClientOriginalName(), PATHINFO_FILENAME));
+            $filename = $safeName . '-' . Str::random(8) . '.' . $ext;
+
+            try {
+                // store file with public visibility (dev). For production use temporaryUrl or proxy.
+                $path = Storage::disk($diskName)->putFileAs($dir, $file, $filename, ['visibility' => 'public']);
+
+                // build url (public)
+                $url = Storage::disk($diskName)->url($path);
+
+                $attachmentData = [
+                    'path' => $path,
+                    'url' => $url,
+                    'filename' => $file->getClientOriginalName(),
+                    'mime' => $file->getClientMimeType(),
+                    'size' => $file->getSize(),
+                ];
+            } catch (\Throwable $e) {
+                Log::error('Attachment upload failed', ['error' => $e->getMessage(), 'order_id' => $order->id]);
+                if ($request->wantsJson() || $request->ajax()) {
+                    return response()->json(['error' => 'Failed to upload attachment'], 500);
+                }
+                return redirect()->back()->with('error', 'Failed to upload attachment.')->withInput();
+            }
+        }
+
 
         $msg = $conv->messages()->create([
             'user_id' => auth()->id(),
-            'body' => $request->body,
+            'from' => auth()->user()->name ?? 'Admin',
+            'body' => $request->input($textKey),
             'direction' => 'out',
+            'attachment' => $attachmentData ? json_encode($attachmentData) : null,
         ]);
 
-        // optional: dispatch job to deliver message to WhatsApp / notifications
+        // prepare payload matching the front-end expectations
+        $payload = [
+            'id' => $msg->id,
+            'message' => $msg->body,
+            'created_at' => $msg->created_at->toISOString(),
+            'from' => $msg->from,
+            'user' => [
+                'id' => auth()->id(),
+                'name' => auth()->user()->name ?? 'Admin',
+            ],
+            'attachment' => $attachmentData ? [
+                'url' => $attachmentData['url'],
+                'filename' => $attachmentData['filename'],
+                'mime' => $attachmentData['mime'],
+                'size' => $attachmentData['size'],
+            ] : null,
+        ];
+
+        // optional: dispatch event to broadcast the new message for real-time UIs
+        // event(new \App\Events\OrderMessageCreated($order, $payload));
+
+        if ($request->wantsJson() || $request->ajax()) {
+            return response()->json(['message' => $payload], Response::HTTP_CREATED);
+        }
+
         return redirect()->back();
     }
 }
