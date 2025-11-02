@@ -39,6 +39,44 @@ services:
       - "1025:1025"
       - "8025:8025"
 
+      # -----------------------------
+  # app container (php-fpm + pcntl + redis + pgsql)
+  app:
+    build:
+      context: .
+      dockerfile: docker/app/Dockerfile
+    image: laundry-app:latest
+    volumes:
+      - ./:/var/www/html
+    working_dir: /var/www/html
+    environment:
+      - APP_ENV=local
+    depends_on:
+      - postgres
+      - redis
+      - minio
+      - mailhog
+    networks:
+      - default
+    tty: true
+
+  # optional: dedicated service to run horizon persistently
+  horizon:
+    build:
+      context: .
+      dockerfile: docker/app/Dockerfile
+    image: laundry-app:latest
+    volumes:
+      - ./:/var/www/html
+    working_dir: /var/www/html
+    depends_on:
+      - redis
+      - postgres
+    command: php artisan horizon
+    restart: unless-stopped
+    networks:
+      - default
+
 volumes:
   pgdata:
   redisdata:
