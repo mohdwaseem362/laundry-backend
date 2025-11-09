@@ -17,7 +17,9 @@ class CountryController extends Controller
     {
         $perPage = (int) $request->input('per_page', 25);
         $q = $request->input('q', null);
-        $query = Country::query();
+
+        // Eager load currency (select only needed fields to reduce payload)
+        $query = Country::with(['currency:id,code,name,symbol'])->newQuery();
 
         if ($q) {
             $query->where(function ($sub) use ($q) {
@@ -35,17 +37,27 @@ class CountryController extends Controller
         ]);
     }
 
+
     /**
      * Sync countries using the import:countries artisan command.
      */
     public function sync(Request $request)
     {
         try {
-            ImportCountriesJob::dispatch(); // queued job
+            ImportCountriesJob::dispatch();
+
+            if ($request->wantsJson() || $request->ajax() || $request->header('X-Inertia')) {
+                return response()->json(['message' => 'Sync started — running in background.'], Response::HTTP_ACCEPTED);
+            }
+
             return redirect()->back()->with('success', 'Sync started — running in background.');
         } catch (\Throwable $e) {
-            \Log::error('Dispatching ImportCountriesJob failed', ['err' => $e->getMessage()]);
-            return redirect()->back()->with('error', 'Failed to start sync: ' . $e->getMessage());
+            Log::error('Dispatching ImportCountriesJob failed', ['err' => $e->getMessage()]);
+            $msg = 'Failed to start sync: ' . $e->getMessage();
+            if ($request->wantsJson() || $request->ajax() || $request->header('X-Inertia')) {
+                return response()->json(['message' => $msg], Response::HTTP_INTERNAL_SERVER_ERROR);
+            }
+            return redirect()->back()->with('error', $msg);
         }
     }
 

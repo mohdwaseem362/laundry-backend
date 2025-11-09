@@ -27,6 +27,8 @@
                         <SidebarItem label="Orders" :icon="icons.orders" href="/admin/orders" />
                         <SidebarItem label="Customers" :icon="icons.users" href="/admin/customers" />
                         <SidebarItem label="Countries" :icon="icons.chart" href="/admin/countries" />
+                        <SidebarItem label="Pincodes" :icon="icons.tag" href="/admin/pincodes" />
+
 
                         <SidebarItem label="Agents" :icon="icons.truck" href="/admin/agents" />
                         <SidebarItem label="Services" :icon="icons.tag" href="/admin/services" />

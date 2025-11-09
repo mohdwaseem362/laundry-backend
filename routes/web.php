@@ -7,6 +7,8 @@ use Inertia\Inertia;
 use App\Http\Controllers\Admin\OrderController;
 use App\Http\Controllers\Admin\CustomerController;
 use App\Http\Controllers\Admin\CountryController;
+use App\Http\Controllers\Admin\PincodeController;
+use App\Http\Controllers\Admin\ZoneController;
 
 
 Route::get('/', function () {
@@ -51,6 +53,17 @@ Route::prefix('admin')->middleware(['auth', 'role:Admin'])->group(function () {
             'update' => 'admin.countries.update',
         ]);
     Route::post('countries/sync', [CountryController::class, 'sync'])->name('admin.countries.sync');
+
+    Route::resource('pincodes', PincodeController::class)->only(['index', 'create', 'store', 'edit', 'update', 'destroy'])->names([
+        'index' => 'admin.pincodes.index',
+        'create' => 'admin.pincodes.create',
+        'store' => 'admin.pincodes.store',
+        'edit' => 'admin.pincodes.edit',
+        'update' => 'admin.pincodes.update',
+        'destroy' => 'admin.pincodes.destroy'
+    ]);
+
+    Route::post('zones/{id}/attach-pincode', [ZoneController::class, 'attachPincode'])->name('admin.zones.attach_pincode');
 });
 
 
